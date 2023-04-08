@@ -5,6 +5,7 @@ use crate::{
     node::NodeId,
     runtime::{with_runtime, RuntimeId},
     suspense::StreamChunk,
+    sync::ReadWriteLock,
     PinnedFuture, ResourceId, SpecialNonReactiveZone, StoredValueId,
     SuspenseContext,
 };
@@ -146,7 +147,7 @@ impl Scope {
 
     fn push_child(&self, child_id: ScopeId) {
         _ = with_runtime(self.runtime, |runtime| {
-            let mut children = runtime.scope_children.borrow_mut();
+            let mut children = runtime.scope_children.write();
             children
                 .entry(self.id)
                 .expect(
@@ -232,7 +233,7 @@ impl Scope {
         _ = with_runtime(self.runtime, |runtime| {
             // dispose of all child scopes
             let children = {
-                let mut children = runtime.scope_children.borrow_mut();
+                let mut children = runtime.scope_children.write();
                 children.remove(self.id)
             };
 
@@ -247,7 +248,7 @@ impl Scope {
             }
             // run cleanups
             if let Some(cleanups) =
-                runtime.scope_cleanups.borrow_mut().remove(self.id)
+                runtime.scope_cleanups.write().remove(self.id)
             {
                 for cleanup in cleanups {
                     cleanup();
@@ -256,7 +257,7 @@ impl Scope {
 
             // remove everything we own and run cleanups
             let owned = {
-                let owned = runtime.scopes.borrow_mut().remove(self.id);
+                let owned = runtime.scopes.write().remove(self.id);
                 owned.map(|owned| owned.take())
             };
             if let Some(owned) = owned {
@@ -264,34 +265,32 @@ impl Scope {
                     match property {
                         ScopeProperty::Signal(id) => {
                             // remove the signal
-                            runtime.nodes.borrow_mut().remove(id);
-                            let subs = runtime
-                                .node_subscribers
-                                .borrow_mut()
-                                .remove(id);
+                            runtime.nodes.write().remove(id);
+                            let subs =
+                                runtime.node_subscribers.write().remove(id);
 
                             // each of the subs needs to remove the signal from its dependencies
                             // so that it doesn't try to read the (now disposed) signal
                             if let Some(subs) = subs {
-                                let source_map = runtime.node_sources.borrow();
-                                for effect in subs.borrow().iter() {
+                                let source_map = runtime.node_sources.read();
+                                for effect in subs.read().iter() {
                                     if let Some(effect_sources) =
                                         source_map.get(*effect)
                                     {
-                                        effect_sources.borrow_mut().remove(&id);
+                                        effect_sources.write().remove(&id);
                                     }
                                 }
                             }
                         }
                         ScopeProperty::Effect(id) => {
-                            runtime.nodes.borrow_mut().remove(id);
-                            runtime.node_sources.borrow_mut().remove(id);
+                            runtime.nodes.write().remove(id);
+                            runtime.node_sources.write().remove(id);
                         }
                         ScopeProperty::Resource(id) => {
-                            runtime.resources.borrow_mut().remove(id);
+                            runtime.resources.write().remove(id);
                         }
                         ScopeProperty::StoredValue(id) => {
-                            runtime.stored_values.borrow_mut().remove(id);
+                            runtime.stored_values.write().remove(id);
                         }
                     }
                 }
@@ -301,9 +300,9 @@ impl Scope {
 
     pub(crate) fn push_scope_property(&self, prop: ScopeProperty) {
         _ = with_runtime(self.runtime, |runtime| {
-            let scopes = runtime.scopes.borrow();
+            let scopes = runtime.scopes.read();
             if let Some(scope) = scopes.get(self.id) {
-                scope.borrow_mut().push(prop);
+                scope.write().push(prop);
             } else {
                 console_warn(
                     "tried to add property to a scope that has been disposed",
@@ -315,7 +314,7 @@ impl Scope {
     /// Returns the the parent Scope, if any.
     pub fn parent(&self) -> Option<Scope> {
         match with_runtime(self.runtime, |runtime| {
-            runtime.scope_parents.borrow().get(self.id).copied()
+            runtime.scope_parents.read().get(self.id).copied()
         }) {
             Ok(Some(id)) => Some(Scope {
                 runtime: self.runtime,
@@ -328,7 +327,7 @@ impl Scope {
 
 fn push_cleanup(cx: Scope, cleanup_fn: Box<dyn FnOnce()>) {
     _ = with_runtime(cx.runtime, |runtime| {
-        let mut cleanups = runtime.scope_cleanups.borrow_mut();
+        let mut cleanups = runtime.scope_cleanups.write();
         let cleanups = cleanups
             .entry(cx.id)
             .expect("trying to clean up a Scope that has already been disposed")
@@ -419,7 +418,7 @@ impl Scope {
         use futures::StreamExt;
 
         _ = with_runtime(self.runtime, |runtime| {
-            let mut shared_context = runtime.shared_context.borrow_mut();
+            let mut shared_context = runtime.shared_context.write();
             let (tx1, mut rx1) = futures::channel::mpsc::unbounded();
             let (tx2, mut rx2) = futures::channel::mpsc::unbounded();
             let (tx3, mut rx3) = futures::channel::mpsc::unbounded();
@@ -463,7 +462,7 @@ impl Scope {
     /// `Future`s that return content for out-of-order and in-order streaming, respectively.
     pub fn pending_fragments(&self) -> HashMap<String, FragmentData> {
         with_runtime(self.runtime, |runtime| {
-            let mut shared_context = runtime.shared_context.borrow_mut();
+            let mut shared_context = runtime.shared_context.write();
             std::mem::take(&mut shared_context.pending_fragments)
         })
         .unwrap_or_default()
@@ -474,7 +473,7 @@ impl Scope {
         use futures::StreamExt;
 
         let mut ready = with_runtime(self.runtime, |runtime| {
-            let mut shared_context = runtime.shared_context.borrow_mut();
+            let mut shared_context = runtime.shared_context.write();
             let ready = FuturesUnordered::new();
             for (_, data) in shared_context.pending_fragments.iter_mut() {
                 if data.should_block {
@@ -495,7 +494,7 @@ impl Scope {
     /// and in-order streaming, respectively.
     pub fn take_pending_fragment(&self, id: &str) -> Option<FragmentData> {
         with_runtime(self.runtime, |runtime| {
-            let mut shared_context = runtime.shared_context.borrow_mut();
+            let mut shared_context = runtime.shared_context.write();
             shared_context.pending_fragments.remove(id)
         })
         .ok()

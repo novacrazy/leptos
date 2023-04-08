@@ -1,5 +1,5 @@
-use crate::AnyComputation;
-use std::{any::Any, cell::RefCell, rc::Rc};
+use crate::{sync::*, AnyComputation};
+use std::any::Any;
 
 slotmap::new_key_type! {
     /// Unique ID assigned to a signal.
@@ -8,7 +8,7 @@ slotmap::new_key_type! {
 
 #[derive(Clone)]
 pub(crate) struct ReactiveNode {
-    pub value: Rc<RefCell<dyn Any>>,
+    pub value: Arc<RwLock<dyn Any>>,
     pub state: ReactiveNodeState,
     pub node_type: ReactiveNodeType,
 }
@@ -16,8 +16,8 @@ pub(crate) struct ReactiveNode {
 #[derive(Clone)]
 pub(crate) enum ReactiveNodeType {
     Signal,
-    Memo { f: Rc<dyn AnyComputation> },
-    Effect { f: Rc<dyn AnyComputation> },
+    Memo { f: Arc<dyn AnyComputation> },
+    Effect { f: Arc<dyn AnyComputation> },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 use crate::{
     create_effect, diagnostics::AccessDiagnostics, node::NodeId, on_cleanup,
-    with_runtime, AnyComputation, RuntimeId, Scope, SignalDispose, SignalGet,
-    SignalGetUntracked, SignalStream, SignalWith, SignalWithUntracked,
+    sync::*, with_runtime, AnyComputation, RuntimeId, Scope, SignalDispose,
+    SignalGet, SignalGetUntracked, SignalStream, SignalWith,
+    SignalWithUntracked,
 };
 use cfg_if::cfg_if;
-use std::{any::Any, cell::RefCell, fmt::Debug, marker::PhantomData, rc::Rc};
+use std::{any::Any, fmt::Debug, marker::PhantomData};
 
 /// Creates an efficient derived reactive value based on other reactive values.
 ///
@@ -458,9 +459,9 @@ where
             )
         )
     )]
-    fn run(&self, value: Rc<RefCell<dyn Any>>) -> bool {
+    fn run(&self, value: Arc<RwLock<dyn Any>>) -> bool {
         let (new_value, is_different) = {
-            let value = value.borrow();
+            let value = value.read();
             let curr_value = value
                 .downcast_ref::<Option<T>>()
                 .expect("to downcast memo value");
@@ -471,7 +472,7 @@ where
             (new_value, is_different)
         };
         if is_different {
-            let mut value = value.borrow_mut();
+            let mut value = value.write();
             let curr_value = value
                 .downcast_mut::<Option<T>>()
                 .expect("to downcast memo value");

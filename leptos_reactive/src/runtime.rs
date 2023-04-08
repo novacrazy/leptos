@@ -2,6 +2,7 @@
 use crate::{
     hydration::SharedContext,
     node::{NodeId, ReactiveNode, ReactiveNodeState, ReactiveNodeType},
+    sync::*,
     AnyComputation, AnyResource, Effect, Memo, MemoState, ReadSignal,
     ResourceId, ResourceState, RwSignal, Scope, ScopeDisposer, ScopeId,
     ScopeProperty, SerializableResource, StoredValueId, UnserializableResource,
@@ -15,12 +16,11 @@ use rustc_hash::{FxHashMap, FxHasher};
 use slotmap::{SecondaryMap, SlotMap, SparseSecondaryMap};
 use std::{
     any::{Any, TypeId},
-    cell::{Cell, RefCell},
+    cell::Cell,
     fmt::Debug,
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    rc::Rc,
 };
 
 pub(crate) type PinnedFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -32,7 +32,7 @@ cfg_if! {
         }
     } else {
         thread_local! {
-            pub(crate) static RUNTIMES: RefCell<SlotMap<RuntimeId, Runtime>> = Default::default();
+            pub(crate) static RUNTIMES: RwLock<SlotMap<RuntimeId, Runtime>> = Default::default();
         }
     }
 }
@@ -43,25 +43,24 @@ type FxIndexSet<T> = IndexSet<T, BuildHasherDefault<FxHasher>>;
 // and other data included in the reactive system.
 #[derive(Default)]
 pub(crate) struct Runtime {
-    pub shared_context: RefCell<SharedContext>,
+    pub shared_context: RwLock<SharedContext>,
     pub observer: Cell<Option<NodeId>>,
-    pub scopes: RefCell<SlotMap<ScopeId, RefCell<Vec<ScopeProperty>>>>,
-    pub scope_parents: RefCell<SparseSecondaryMap<ScopeId, ScopeId>>,
-    pub scope_children: RefCell<SparseSecondaryMap<ScopeId, Vec<ScopeId>>>,
+    pub scopes: RwLock<SlotMap<ScopeId, RwLock<Vec<ScopeProperty>>>>,
+    pub scope_parents: RwLock<SparseSecondaryMap<ScopeId, ScopeId>>,
+    pub scope_children: RwLock<SparseSecondaryMap<ScopeId, Vec<ScopeId>>>,
     #[allow(clippy::type_complexity)]
     pub scope_contexts:
-        RefCell<SparseSecondaryMap<ScopeId, FxHashMap<TypeId, Box<dyn Any>>>>,
+        RwLock<SparseSecondaryMap<ScopeId, FxHashMap<TypeId, Box<dyn Any>>>>,
     #[allow(clippy::type_complexity)]
     pub scope_cleanups:
-        RefCell<SparseSecondaryMap<ScopeId, Vec<Box<dyn FnOnce()>>>>,
-    pub stored_values: RefCell<SlotMap<StoredValueId, Rc<RefCell<dyn Any>>>>,
-    pub nodes: RefCell<SlotMap<NodeId, ReactiveNode>>,
+        RwLock<SparseSecondaryMap<ScopeId, Vec<Box<dyn FnOnce()>>>>,
+    pub stored_values: RwLock<SlotMap<StoredValueId, Arc<RwLock<dyn Any>>>>,
+    pub nodes: RwLock<SlotMap<NodeId, ReactiveNode>>,
     pub node_subscribers:
-        RefCell<SecondaryMap<NodeId, RefCell<FxIndexSet<NodeId>>>>,
-    pub node_sources:
-        RefCell<SecondaryMap<NodeId, RefCell<FxIndexSet<NodeId>>>>,
-    pub pending_effects: RefCell<Vec<NodeId>>,
-    pub resources: RefCell<SlotMap<ResourceId, AnyResource>>,
+        RwLock<SecondaryMap<NodeId, RwLock<FxIndexSet<NodeId>>>>,
+    pub node_sources: RwLock<SecondaryMap<NodeId, RwLock<FxIndexSet<NodeId>>>>,
+    pub pending_effects: RwLock<Vec<NodeId>>,
+    pub resources: RwLock<SlotMap<ResourceId, AnyResource>>,
     pub batching: Cell<bool>,
 }
 
@@ -75,11 +74,11 @@ impl Runtime {
         //crate::macros::debug_warn!("update_if_necessary {node_id:?}");
         if self.current_state(node_id) == ReactiveNodeState::Check {
             let sources = {
-                let sources = self.node_sources.borrow();
+                let sources = self.node_sources.read();
 
                 // rather than cloning the entire FxIndexSet, only allocate a `Vec` for the node ids
                 sources.get(node_id).map(|n| {
-                    let sources = n.borrow();
+                    let sources = n.read();
                     // in case Vec::from_iterator specialization doesn't work, do it manually
                     let mut sources_vec = Vec::with_capacity(sources.len());
                     sources_vec.extend(sources.iter().cloned());
@@ -109,7 +108,7 @@ impl Runtime {
     pub(crate) fn update(&self, node_id: NodeId) {
         //crate::macros::debug_warn!("updating {node_id:?}");
         let node = {
-            let nodes = self.nodes.borrow();
+            let nodes = self.nodes.read();
             nodes.get(node_id).cloned()
         };
 
@@ -125,18 +124,18 @@ impl Runtime {
                         // clean up sources of this memo/effect
                         self.cleanup(node_id);
 
-                        f.run(Rc::clone(&node.value))
+                        f.run(Arc::clone(&node.value))
                     })
                 }
             };
 
             // mark children dirty
             if changed {
-                let subs = self.node_subscribers.borrow();
+                let subs = self.node_subscribers.read();
 
                 if let Some(subs) = subs.get(node_id) {
-                    let mut nodes = self.nodes.borrow_mut();
-                    for sub_id in subs.borrow().iter() {
+                    let mut nodes = self.nodes.write();
+                    for sub_id in subs.read().iter() {
                         if let Some(sub) = nodes.get_mut(*sub_id) {
                             //crate::macros::debug_warn!(
                             //    "update is marking {sub_id:?} dirty"
@@ -153,19 +152,19 @@ impl Runtime {
     }
 
     pub(crate) fn cleanup(&self, node_id: NodeId) {
-        let sources = self.node_sources.borrow();
+        let sources = self.node_sources.read();
         if let Some(sources) = sources.get(node_id) {
-            let subs = self.node_subscribers.borrow();
-            for source in sources.borrow().iter() {
+            let subs = self.node_subscribers.read();
+            for source in sources.read().iter() {
                 if let Some(source) = subs.get(*source) {
-                    source.borrow_mut().remove(&node_id);
+                    source.write().remove(&node_id);
                 }
             }
         }
     }
 
     fn current_state(&self, node: NodeId) -> ReactiveNodeState {
-        match self.nodes.borrow().get(node) {
+        match self.nodes.read().get(node) {
             None => ReactiveNodeState::Clean,
             Some(node) => node.state,
         }
@@ -181,7 +180,7 @@ impl Runtime {
 
     fn mark_clean(&self, node: NodeId) {
         //crate::macros::debug_warn!("marking {node:?} clean");
-        let mut nodes = self.nodes.borrow_mut();
+        let mut nodes = self.nodes.write();
         if let Some(node) = nodes.get_mut(node) {
             node.state = ReactiveNodeState::Clean;
         }
@@ -190,9 +189,9 @@ impl Runtime {
     #[allow(clippy::await_holding_refcell_ref)] // not using this part of ouroboros
     pub(crate) fn mark_dirty(&self, node: NodeId) {
         //crate::macros::debug_warn!("marking {node:?} dirty");
-        let mut nodes = self.nodes.borrow_mut();
-        let mut pending_effects = self.pending_effects.borrow_mut();
-        let subscribers = self.node_subscribers.borrow();
+        let mut nodes = self.nodes.write();
+        let mut pending_effects = self.pending_effects.write();
+        let subscribers = self.node_subscribers.read();
         let current_observer = self.observer.get();
 
         // mark self dirty
@@ -210,7 +209,7 @@ impl Runtime {
              * buffering the entire to-visit list. Visited nodes are either marked as
              * `Check` or `DirtyMarked`.
              *
-             * Because `RefCell`, borrowing the iterators all at once is difficult,
+             * Because `RwLock`, borrowing the iterators all at once is difficult,
              * so a self-referential struct is used instead. ouroboros produces safe
              * code, but it would not be recommended to use this outside of this
              * algorithm.
@@ -218,7 +217,9 @@ impl Runtime {
 
             #[ouroboros::self_referencing]
             struct RefIter<'a> {
-                set: std::cell::Ref<'a, FxIndexSet<NodeId>>,
+                set: <RwLock<FxIndexSet<NodeId>> as ReadWriteLock<
+                    FxIndexSet<NodeId>,
+                >>::ReadGuard<'a>,
 
                 // Boxes the iterator internally
                 #[borrows(set)]
@@ -239,7 +240,7 @@ impl Runtime {
             let mut stack = Vec::new();
 
             if let Some(children) = subscribers.get(node) {
-                stack.push(RefIter::new(children.borrow(), |children| {
+                stack.push(RefIter::new(children.read(), |children| {
                     children.iter()
                 }));
             }
@@ -266,7 +267,7 @@ impl Runtime {
                         );
 
                         if let Some(children) = subscribers.get(child) {
-                            let children = children.borrow();
+                            let children = children.read();
 
                             if !children.is_empty() {
                                 // avoid going through an iterator in the simple psuedo-recursive case
@@ -341,9 +342,9 @@ impl Runtime {
     }
 
     pub(crate) fn dispose_node(&self, node: NodeId) {
-        self.node_sources.borrow_mut().remove(node);
-        self.node_subscribers.borrow_mut().remove(node);
-        self.nodes.borrow_mut().remove(node);
+        self.node_sources.write().remove(node);
+        self.node_subscribers.write().remove(node);
+        self.nodes.write().remove(node);
     }
 }
 
@@ -372,7 +373,7 @@ pub(crate) fn with_runtime<T>(
             Ok(RUNTIME.with(|runtime| f(runtime)))
         } else {
             RUNTIMES.with(|runtimes| {
-                let runtimes = runtimes.borrow();
+                let runtimes = runtimes.read();
                 match runtimes.get(id) {
                     None => Err(()),
                     Some(runtime) => Ok(f(runtime))
@@ -390,7 +391,7 @@ pub fn create_runtime() -> RuntimeId {
         if #[cfg(any(feature = "csr", feature = "hydrate"))] {
             Default::default()
         } else {
-            RUNTIMES.with(|runtimes| runtimes.borrow_mut().insert(Runtime::new()))
+            RUNTIMES.with(|runtimes| runtimes.write().insert(Runtime::new()))
         }
     }
 }
@@ -411,7 +412,7 @@ impl RuntimeId {
     pub fn dispose(self) {
         cfg_if! {
             if #[cfg(not(any(feature = "csr", feature = "hydrate")))] {
-                let runtime = RUNTIMES.with(move |runtimes| runtimes.borrow_mut().remove(self));
+                let runtime = RUNTIMES.with(move |runtimes| runtimes.write().remove(self));
                 drop(runtime);
             }
         }
@@ -419,7 +420,7 @@ impl RuntimeId {
 
     pub(crate) fn raw_scope_and_disposer(self) -> (Scope, ScopeDisposer) {
         with_runtime(self, |runtime| {
-            let id = { runtime.scopes.borrow_mut().insert(Default::default()) };
+            let id = { runtime.scopes.write().insert(Default::default()) };
             let scope = Scope { runtime: self, id };
             let disposer = ScopeDisposer(scope);
             (scope, disposer)
@@ -435,9 +436,9 @@ impl RuntimeId {
         parent: Option<Scope>,
     ) -> (Scope, ScopeDisposer) {
         with_runtime(self, |runtime| {
-            let id = { runtime.scopes.borrow_mut().insert(Default::default()) };
+            let id = { runtime.scopes.write().insert(Default::default()) };
             if let Some(parent) = parent {
-                runtime.scope_parents.borrow_mut().insert(id, parent.id);
+                runtime.scope_parents.write().insert(id, parent.id);
             }
             let scope = Scope { runtime: self, id };
             let disposer = ScopeDisposer(scope);
@@ -470,10 +471,10 @@ impl RuntimeId {
 
     pub(crate) fn create_concrete_signal(
         self,
-        value: Rc<RefCell<dyn Any>>,
+        value: Arc<RwLock<dyn Any>>,
     ) -> NodeId {
         with_runtime(self, |runtime| {
-            runtime.nodes.borrow_mut().insert(ReactiveNode {
+            runtime.nodes.write().insert(ReactiveNode {
                 value,
                 state: ReactiveNodeState::Clean,
                 node_type: ReactiveNodeType::Signal,
@@ -492,7 +493,7 @@ impl RuntimeId {
         T: Any + 'static,
     {
         let id = self.create_concrete_signal(
-            Rc::new(RefCell::new(value)) as Rc<RefCell<dyn Any>>
+            Arc::new(RwLock::new(value)) as Arc<RwLock<dyn Any>>
         );
 
         (
@@ -524,14 +525,14 @@ impl RuntimeId {
         T: Any + 'static,
     {
         with_runtime(self, move |runtime| {
-            let mut signals = runtime.nodes.borrow_mut();
-            let properties = runtime.scopes.borrow();
+            let mut signals = runtime.nodes.write();
+            let properties = runtime.scopes.read();
             let mut properties = properties
                 .get(cx.id)
                 .expect(
                     "tried to add signals to a scope that has been disposed",
                 )
-                .borrow_mut();
+                .write();
             let values = values.into_iter();
             let size = values.size_hint().0;
             signals.reserve(size);
@@ -539,7 +540,7 @@ impl RuntimeId {
             values
                 .map(|value| {
                     signals.insert(ReactiveNode {
-                        value: Rc::new(RefCell::new(value)),
+                        value: Arc::new(RwLock::new(value)),
                         state: ReactiveNodeState::Clean,
                         node_type: ReactiveNodeType::Signal,
                     })
@@ -576,7 +577,7 @@ impl RuntimeId {
         T: Any + 'static,
     {
         let id = self.create_concrete_signal(
-            Rc::new(RefCell::new(value)) as Rc<RefCell<dyn Any>>
+            Arc::new(RwLock::new(value)) as Arc<RwLock<dyn Any>>
         );
         //crate::macros::debug_warn!(
         //    "created RwSignal {id:?} at {:?}",
@@ -593,15 +594,15 @@ impl RuntimeId {
 
     pub(crate) fn create_concrete_effect(
         self,
-        value: Rc<RefCell<dyn Any>>,
-        effect: Rc<dyn AnyComputation>,
+        value: Arc<RwLock<dyn Any>>,
+        effect: Arc<dyn AnyComputation>,
     ) -> NodeId {
         with_runtime(self, |runtime| {
-            let id = runtime.nodes.borrow_mut().insert(ReactiveNode {
-                value: Rc::clone(&value),
+            let id = runtime.nodes.write().insert(ReactiveNode {
+                value: Arc::clone(&value),
                 state: ReactiveNodeState::Clean,
                 node_type: ReactiveNodeType::Effect {
-                    f: Rc::clone(&effect),
+                    f: Arc::clone(&effect),
                 },
             });
 
@@ -620,11 +621,11 @@ impl RuntimeId {
 
     pub(crate) fn create_concrete_memo(
         self,
-        value: Rc<RefCell<dyn Any>>,
-        computation: Rc<dyn AnyComputation>,
+        value: Arc<RwLock<dyn Any>>,
+        computation: Arc<dyn AnyComputation>,
     ) -> NodeId {
         with_runtime(self, |runtime| {
-            runtime.nodes.borrow_mut().insert(ReactiveNode {
+            runtime.nodes.write().insert(ReactiveNode {
                 value,
                 // memos are lazy, so are dirty when created
                 // will be run the first time we ask for it
@@ -645,8 +646,8 @@ impl RuntimeId {
         T: Any + 'static,
     {
         self.create_concrete_effect(
-            Rc::new(RefCell::new(None::<T>)),
-            Rc::new(Effect {
+            Arc::new(RwLock::new(None::<T>)),
+            Arc::new(Effect {
                 f,
                 ty: PhantomData,
                 #[cfg(debug_assertions)]
@@ -667,8 +668,8 @@ impl RuntimeId {
         Memo {
             runtime: self,
             id: self.create_concrete_memo(
-                Rc::new(RefCell::new(None::<T>)),
-                Rc::new(MemoState {
+                Arc::new(RwLock::new(None::<T>)),
+                Arc::new(MemoState {
                     f,
                     t: PhantomData,
                     #[cfg(debug_assertions)]
@@ -689,19 +690,19 @@ impl Runtime {
 
     pub(crate) fn create_unserializable_resource(
         &self,
-        state: Rc<dyn UnserializableResource>,
+        state: Arc<dyn UnserializableResource>,
     ) -> ResourceId {
         self.resources
-            .borrow_mut()
+            .write()
             .insert(AnyResource::Unserializable(state))
     }
 
     pub(crate) fn create_serializable_resource(
         &self,
-        state: Rc<dyn SerializableResource>,
+        state: Arc<dyn SerializableResource>,
     ) -> ResourceId {
         self.resources
-            .borrow_mut()
+            .write()
             .insert(AnyResource::Serializable(state))
     }
 
@@ -714,7 +715,7 @@ impl Runtime {
         S: 'static,
         T: 'static,
     {
-        let resources = self.resources.borrow();
+        let resources = self.resources.read();
         let res = resources.get(id);
         if let Some(res) = res {
             let res_state = match res {
@@ -740,7 +741,7 @@ impl Runtime {
     /// Returns IDs for all [resources](crate::Resource) found on any scope.
     pub(crate) fn all_resources(&self) -> Vec<ResourceId> {
         self.resources
-            .borrow()
+            .read()
             .iter()
             .map(|(resource_id, _)| resource_id)
             .collect()
@@ -750,7 +751,7 @@ impl Runtime {
     /// scope, pending from the server.
     pub(crate) fn pending_resources(&self) -> Vec<ResourceId> {
         self.resources
-            .borrow()
+            .read()
             .iter()
             .filter_map(|(resource_id, res)| {
                 if matches!(res, AnyResource::Serializable(_)) {
@@ -767,7 +768,7 @@ impl Runtime {
         cx: Scope,
     ) -> FuturesUnordered<PinnedFuture<(ResourceId, String)>> {
         let f = FuturesUnordered::new();
-        for (id, resource) in self.resources.borrow().iter() {
+        for (id, resource) in self.resources.read().iter() {
             if let AnyResource::Serializable(resource) = resource {
                 f.push(resource.to_serialization_resolver(cx, id));
             }
@@ -778,9 +779,9 @@ impl Runtime {
     pub(crate) fn get_value(
         &self,
         node_id: NodeId,
-    ) -> Option<Rc<RefCell<dyn Any>>> {
-        let signals = self.nodes.borrow();
-        signals.get(node_id).map(|node| Rc::clone(&node.value))
+    ) -> Option<Arc<RwLock<dyn Any>>> {
+        let signals = self.nodes.read();
+        signals.get(node_id).map(|node| Arc::clone(&node.value))
     }
 }
 

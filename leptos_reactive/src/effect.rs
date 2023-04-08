@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
-use crate::{Scope, ScopeProperty};
+use crate::{sync::*, Scope, ScopeProperty};
 use cfg_if::cfg_if;
-use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
+use std::{any::Any, marker::PhantomData};
 
 /// Effects run a certain chunk of code whenever the signals they depend on change.
 /// `create_effect` immediately runs the given function once, tracks its dependence
@@ -158,7 +158,7 @@ where
 }
 
 pub(crate) trait AnyComputation {
-    fn run(&self, value: Rc<RefCell<dyn Any>>) -> bool;
+    fn run(&self, value: Arc<RwLock<dyn Any>>) -> bool;
 }
 
 impl<T, F> AnyComputation for Effect<T, F>
@@ -178,13 +178,13 @@ where
             )
         )
     )]
-    fn run(&self, value: Rc<RefCell<dyn Any>>) -> bool {
+    fn run(&self, value: Arc<RwLock<dyn Any>>) -> bool {
         // we defensively take and release the BorrowMut twice here
         // in case a change during the effect running schedules a rerun
         // ideally this should never happen, but this guards against panic
         let curr_value = {
             // downcast value
-            let mut value = value.borrow_mut();
+            let mut value = value.write();
             let value = value
                 .downcast_mut::<Option<T>>()
                 .expect("to downcast effect value");
@@ -195,7 +195,7 @@ where
         let new_value = (self.f)(curr_value);
 
         // set new value
-        let mut value = value.borrow_mut();
+        let mut value = value.write();
         let value = value
             .downcast_mut::<Option<T>>()
             .expect("to downcast effect value");

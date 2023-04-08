@@ -5,19 +5,13 @@ use crate::{
     runtime::{with_runtime, RuntimeId},
     serialization::Serializable,
     spawn::spawn_local,
+    sync::*,
     use_context, Memo, ReadSignal, Scope, ScopeProperty, SignalUpdate,
     SignalWith, SuspenseContext, WriteSignal,
 };
 use std::{
-    any::Any,
-    cell::{Cell, RefCell},
-    collections::HashSet,
-    fmt::Debug,
-    future::Future,
-    marker::PhantomData,
-    panic::Location,
-    pin::Pin,
-    rc::Rc,
+    any::Any, cell::Cell, collections::HashSet, fmt::Debug, future::Future,
+    marker::PhantomData, panic::Location, pin::Pin,
 };
 
 /// Creates [Resource](crate::Resource), which is a signal that reflects the
@@ -184,33 +178,33 @@ where
     let (loading, set_loading) = create_signal(cx, false);
 
     //crate::macros::debug_warn!("creating fetcher");
-    let fetcher = Rc::new(move |s| {
+    let fetcher = Arc::new(move |s| {
         Box::pin(fetcher(s)) as Pin<Box<dyn Future<Output = T>>>
     });
     let source = create_memo(cx, move |_| source());
 
-    let r = Rc::new(ResourceState {
+    let r = Arc::new(ResourceState {
         value,
         set_value,
         loading,
         set_loading,
         source,
         fetcher,
-        resolved: Rc::new(Cell::new(resolved)),
-        scheduled: Rc::new(Cell::new(false)),
+        resolved: Arc::new(Cell::new(resolved)),
+        scheduled: Arc::new(Cell::new(false)),
         suspense_contexts: Default::default(),
         serializable,
     });
 
     let id = with_runtime(cx.runtime, |runtime| {
-        let r = Rc::clone(&r) as Rc<dyn SerializableResource>;
+        let r = Arc::clone(&r) as Arc<dyn SerializableResource>;
         runtime.create_serializable_resource(r)
     })
     .expect("tried to create a Resource in a Runtime that has been disposed.");
 
     //crate::macros::debug_warn!("creating effect");
     create_isomorphic_effect(cx, {
-        let r = Rc::clone(&r);
+        let r = Arc::clone(&r);
         move |_| {
             load_resource(cx, id, r.clone());
         }
@@ -308,32 +302,32 @@ where
 
     let (loading, set_loading) = create_signal(cx, false);
 
-    let fetcher = Rc::new(move |s| {
+    let fetcher = Arc::new(move |s| {
         Box::pin(fetcher(s)) as Pin<Box<dyn Future<Output = T>>>
     });
     let source = create_memo(cx, move |_| source());
 
-    let r = Rc::new(ResourceState {
+    let r = Arc::new(ResourceState {
         value,
         set_value,
         loading,
         set_loading,
         source,
         fetcher,
-        resolved: Rc::new(Cell::new(resolved)),
-        scheduled: Rc::new(Cell::new(false)),
+        resolved: Arc::new(Cell::new(resolved)),
+        scheduled: Arc::new(Cell::new(false)),
         suspense_contexts: Default::default(),
         serializable: ResourceSerialization::Local,
     });
 
     let id = with_runtime(cx.runtime, |runtime| {
-        let r = Rc::clone(&r) as Rc<dyn UnserializableResource>;
+        let r = Arc::clone(&r) as Arc<dyn UnserializableResource>;
         runtime.create_unserializable_resource(r)
     })
     .expect("tried to create a Resource in a runtime that has been disposed.");
 
     create_effect(cx, {
-        let r = Rc::clone(&r);
+        let r = Arc::clone(&r);
         // This is a local resource, so we're always going to handle it on the
         // client
         move |_| r.load(false)
@@ -352,7 +346,7 @@ where
 }
 
 #[cfg(not(feature = "hydrate"))]
-fn load_resource<S, T>(_cx: Scope, _id: ResourceId, r: Rc<ResourceState<S, T>>)
+fn load_resource<S, T>(_cx: Scope, _id: ResourceId, r: Arc<ResourceState<S, T>>)
 where
     S: PartialEq + Debug + Clone + 'static,
     T: 'static,
@@ -365,7 +359,7 @@ where
 }
 
 #[cfg(feature = "hydrate")]
-fn load_resource<S, T>(cx: Scope, id: ResourceId, r: Rc<ResourceState<S, T>>)
+fn load_resource<S, T>(cx: Scope, id: ResourceId, r: Arc<ResourceState<S, T>>)
 where
     S: PartialEq + Debug + Clone + 'static,
     T: Serializable + 'static,
@@ -623,10 +617,10 @@ where
     set_loading: WriteSignal<bool>,
     source: Memo<S>,
     #[allow(clippy::type_complexity)]
-    fetcher: Rc<dyn Fn(S) -> Pin<Box<dyn Future<Output = T>>>>,
-    resolved: Rc<Cell<bool>>,
-    scheduled: Rc<Cell<bool>>,
-    suspense_contexts: Rc<RefCell<HashSet<SuspenseContext>>>,
+    fetcher: Arc<dyn Fn(S) -> Pin<Box<dyn Future<Output = T>>>>,
+    resolved: Arc<Cell<bool>>,
+    scheduled: Arc<Cell<bool>>,
+    suspense_contexts: Arc<RwLock<HashSet<SuspenseContext>>>,
     serializable: ResourceSerialization,
 }
 
@@ -703,8 +697,7 @@ where
 
         let increment = move |_: Option<()>| {
             if let Some(s) = &suspense_cx {
-                if let Ok(ref mut contexts) = suspense_contexts.try_borrow_mut()
-                {
+                if let Some(ref mut contexts) = suspense_contexts.try_write() {
                     if !contexts.contains(s) {
                         contexts.insert(*s);
 
@@ -746,7 +739,7 @@ where
             // `scheduled` is true for the rest of this code only
             self.scheduled.set(true);
             queue_microtask({
-                let scheduled = Rc::clone(&self.scheduled);
+                let scheduled = Arc::clone(&self.scheduled);
                 move || {
                     scheduled.set(false);
                 }
@@ -757,7 +750,7 @@ where
             // increment counter everywhere it's read
             let suspense_contexts = self.suspense_contexts.clone();
 
-            for suspense_context in suspense_contexts.borrow().iter() {
+            for suspense_context in suspense_contexts.read().iter() {
                 suspense_context.increment(
                     self.serializable != ResourceSerialization::Local,
                 );
@@ -780,7 +773,7 @@ where
                     set_value.update(|n| *n = Some(res));
                     set_loading.update(|n| *n = false);
 
-                    for suspense_context in suspense_contexts.borrow().iter() {
+                    for suspense_context in suspense_contexts.read().iter() {
                         suspense_context.decrement(
                             serializable != ResourceSerialization::Local,
                         );
@@ -828,8 +821,8 @@ where
 }
 
 pub(crate) enum AnyResource {
-    Unserializable(Rc<dyn UnserializableResource>),
-    Serializable(Rc<dyn SerializableResource>),
+    Unserializable(Arc<dyn UnserializableResource>),
+    Serializable(Arc<dyn SerializableResource>),
 }
 
 pub(crate) trait SerializableResource {

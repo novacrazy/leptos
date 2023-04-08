@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-use crate::{with_runtime, RuntimeId, Scope, ScopeProperty};
-use std::{cell::RefCell, marker::PhantomData, rc::Rc};
+use crate::{sync::*, with_runtime, RuntimeId, Scope, ScopeProperty};
+use std::marker::PhantomData;
 
 slotmap::new_key_type! {
     /// Unique ID assigned to a [StoredValue].
@@ -191,9 +191,9 @@ impl<T> StoredValue<T> {
     /// the signal is still valid. [`None`] otherwise.
     pub fn try_with_value<O>(&self, f: impl FnOnce(&T) -> O) -> Option<O> {
         with_runtime(self.runtime, |runtime| {
-            let values = runtime.stored_values.borrow();
+            let values = runtime.stored_values.read();
             let value = values.get(self.id)?;
-            let value = value.borrow();
+            let value = value.read();
             let value = value.downcast_ref::<T>()?;
             Some(f(value))
         })
@@ -299,9 +299,9 @@ impl<T> StoredValue<T> {
     /// signal is still valid, [`None`] otherwise.
     pub fn try_update_value<O>(self, f: impl FnOnce(&mut T) -> O) -> Option<O> {
         with_runtime(self.runtime, |runtime| {
-            let values = runtime.stored_values.borrow();
+            let values = runtime.stored_values.read();
             let value = values.get(self.id)?;
-            let mut value = value.borrow_mut();
+            let mut value = value.write();
             let value = value.downcast_mut::<T>()?;
             Some(f(value))
         })
@@ -356,9 +356,9 @@ impl<T> StoredValue<T> {
     /// still valid, [`Some(T)`] otherwise.
     pub fn try_set_value(&self, value: T) -> Option<T> {
         with_runtime(self.runtime, |runtime| {
-            let values = runtime.stored_values.borrow();
+            let values = runtime.stored_values.read();
             let n = values.get(self.id);
-            let mut n = n.map(|n| n.borrow_mut());
+            let mut n = n.map(|n| n.write());
             let n = n.as_mut().and_then(|n| n.downcast_mut::<T>());
             if let Some(n) = n {
                 *n = value;
@@ -414,8 +414,8 @@ where
     let id = with_runtime(cx.runtime, |runtime| {
         runtime
             .stored_values
-            .borrow_mut()
-            .insert(Rc::new(RefCell::new(value)))
+            .write()
+            .insert(Arc::new(RwLock::new(value)))
     })
     .unwrap_or_default();
     cx.push_scope_property(ScopeProperty::StoredValue(id));

@@ -69,6 +69,8 @@
 #[cfg_attr(debug_assertions, macro_use)]
 extern crate tracing;
 
+pub mod sync;
+
 #[macro_use]
 mod signal;
 mod context;

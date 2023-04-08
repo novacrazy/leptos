@@ -6,13 +6,12 @@ use crate::{
     node::NodeId,
     on_cleanup,
     runtime::{with_runtime, RuntimeId},
+    sync::*,
     Runtime, Scope, ScopeProperty,
 };
 use cfg_if::cfg_if;
 use futures::Stream;
-use std::{
-    any::Any, cell::RefCell, fmt::Debug, marker::PhantomData, pin::Pin, rc::Rc,
-};
+use std::{any::Any, fmt::Debug, marker::PhantomData, pin::Pin};
 use thiserror::Error;
 
 macro_rules! impl_get_fn_traits {
@@ -1826,16 +1825,16 @@ impl NodeId {
         // add subscriber
         if let Some(observer) = runtime.observer.get() {
             // add this observer to this node's dependencies (to allow notification)
-            let mut subs = runtime.node_subscribers.borrow_mut();
+            let mut subs = runtime.node_subscribers.write();
             if let Some(subs) = subs.entry(*self) {
-                subs.or_default().borrow_mut().insert(observer);
+                subs.or_default().write().insert(observer);
             }
 
             // add this node to the observer's sources (to allow cleanup)
-            let mut sources = runtime.node_sources.borrow_mut();
+            let mut sources = runtime.node_sources.write();
             if let Some(sources) = sources.entry(observer) {
                 let sources = sources.or_default();
-                sources.borrow_mut().insert(*self);
+                sources.write().insert(*self);
             }
         } else {
             #[cfg(all(debug_assertions, not(feature = "ssr")))]
@@ -1869,11 +1868,11 @@ impl NodeId {
     fn try_with_no_subscription_inner(
         &self,
         runtime: &Runtime,
-    ) -> Result<Rc<RefCell<dyn Any>>, SignalError> {
+    ) -> Result<Arc<RwLock<dyn Any>>, SignalError> {
         runtime.update_if_necessary(*self);
-        let nodes = runtime.nodes.borrow();
+        let nodes = runtime.nodes.read();
         let node = nodes.get(*self).ok_or(SignalError::Disposed)?;
-        Ok(Rc::clone(&node.value))
+        Ok(Arc::clone(&node.value))
     }
 
     #[track_caller]
@@ -1887,7 +1886,7 @@ impl NodeId {
         T: 'static,
     {
         let value = self.try_with_no_subscription_inner(runtime)?;
-        let value = value.borrow();
+        let value = value.read();
         let value = value
             .downcast_ref::<T>()
             .ok_or_else(|| SignalError::Type(std::any::type_name::<T>()))
@@ -1937,7 +1936,7 @@ impl NodeId {
     {
         with_runtime(runtime, |runtime| {
             if let Some(value) = runtime.get_value(*self) {
-                let mut value = value.borrow_mut();
+                let mut value = value.write();
                 if let Some(value) = value.downcast_mut::<T>() {
                     Some(f(value))
                 } else {
@@ -1974,7 +1973,7 @@ impl NodeId {
     {
         with_runtime(runtime_id, |runtime| {
             let updated = if let Some(value) = runtime.get_value(*self) {
-                let mut value = value.borrow_mut();
+                let mut value = value.write();
                 if let Some(value) = value.downcast_mut::<T>() {
                     Some(f(value))
                 } else {

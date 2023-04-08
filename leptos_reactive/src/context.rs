@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crate::{runtime::with_runtime, Scope};
+use crate::{runtime::with_runtime, sync::*, Scope};
 use std::any::{Any, TypeId};
 
 /// Provides a context value of type `T` to the current reactive [Scope](crate::Scope)
@@ -54,7 +54,7 @@ where
     let id = value.type_id();
 
     _ = with_runtime(cx.runtime, |runtime| {
-        let mut contexts = runtime.scope_contexts.borrow_mut();
+        let mut contexts = runtime.scope_contexts.write();
         let context = contexts.entry(cx.id).unwrap().or_default();
         context.insert(id, Box::new(value) as Box<dyn Any>);
     });
@@ -113,7 +113,7 @@ where
     let id = TypeId::of::<T>();
     with_runtime(cx.runtime, |runtime| {
         let local_value = {
-            let contexts = runtime.scope_contexts.borrow();
+            let contexts = runtime.scope_contexts.read();
             let context = contexts.get(cx.id);
             context
                 .and_then(|context| {
@@ -124,16 +124,12 @@ where
         match local_value {
             Some(val) => Some(val),
             None => {
-                runtime
-                    .scope_parents
-                    .borrow()
-                    .get(cx.id)
-                    .and_then(|parent| {
-                        use_context::<T>(Scope {
-                            runtime: cx.runtime,
-                            id: *parent,
-                        })
+                runtime.scope_parents.read().get(cx.id).and_then(|parent| {
+                    use_context::<T>(Scope {
+                        runtime: cx.runtime,
+                        id: *parent,
                     })
+                })
             }
         }
     })
