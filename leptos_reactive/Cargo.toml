@@ -43,6 +43,7 @@ web-sys = { version = "0.3", optional = true, features = [
 cfg-if = "1"
 indexmap = "1"
 ouroboros = { version = "0.15.6", default-features = false }
+parking_lot = { version = "0.12", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.4.0", features = ["html_reports"] }
@@ -74,6 +75,7 @@ serde-lite = ["dep:serde-lite"]
 miniserde = ["dep:miniserde"]
 rkyv = ["dep:rkyv", "dep:bytecheck"]
 sync = []
+parking_lot = ["sync", "dep:parking_lot"]
 
 [package.metadata.cargo-all-features]
 denylist = ["stable"]

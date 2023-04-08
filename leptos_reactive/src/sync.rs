@@ -94,8 +94,11 @@ mod imp {
     pub type Arc<T> = std::sync::Arc<T>;
 
     use super::ReadWriteLock;
+
+    #[cfg(not(feature = "parking_lot"))]
     use std::sync::{RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard};
 
+    #[cfg(not(feature = "parking_lot"))]
     impl<T: ?Sized> ReadWriteLock<T> for RwLock<T> {
         type ReadGuard<'a> = RwLockReadGuard<'a, T> where T: 'a;
         type WriteGuard<'a> = RwLockWriteGuard<'a, T> where T: 'a;
@@ -114,6 +117,31 @@ mod imp {
 
         fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
             self.0.try_write().ok()
+        }
+    }
+
+    #[cfg(feature = "parking_lot")]
+    use parking_lot::{RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard};
+
+    #[cfg(feature = "parking_lot")]
+    impl<T: ?Sized> ReadWriteLock<T> for RwLock<T> {
+        type ReadGuard<'a> = RwLockReadGuard<'a, T> where T: 'a;
+        type WriteGuard<'a> = RwLockWriteGuard<'a, T> where T: 'a;
+
+        fn read(&self) -> Self::ReadGuard<'_> {
+            self.0.read()
+        }
+
+        fn write(&self) -> Self::WriteGuard<'_> {
+            self.0.write()
+        }
+
+        fn try_read(&self) -> Option<Self::ReadGuard<'_>> {
+            self.0.try_read()
+        }
+
+        fn try_write(&self) -> Option<Self::WriteGuard<'_>> {
+            self.0.try_write()
         }
     }
 }
